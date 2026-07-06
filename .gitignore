@@ -1,0 +1,19 @@
+# 대용량 모델 파일
+*.pth
+
+# 데이터셋
+data/
+
+# Python 캐시
+__pycache__/
+*.pyc
+*.pyo
+
+# Node.js
+node_modules/
+
+# 로그
+*.log
+
+# macOS
+.DS_Store
