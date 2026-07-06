@@ -156,6 +156,19 @@ Dice loss는 폴립처럼 전경 비율이 낮은 데이터에서 클래스 불�
 | 중 | 원본 + 예측 마스크(초록) + **75% BBox 프롬프트**(주황) |
 | 우 | TP(초록) / FP(빨강) / FN(파랑) 오류 분석 |
 
+### 100-step 파인튜닝 결과 (Kvasir-SEG, 75% bbox 프롬프트)
+
+![result02](outputs/inference_100steps/02_cju1alwgo30z60855fm3y23sm_result.png)
+![result04](outputs/inference_100steps/04_cju1aqqv02qwz0878a5cyhr67_result.png)
+![result06](outputs/inference_100steps/06_cju1b0y2e396p08558ois175d_result.png)
+![result08](outputs/inference_100steps/08_cju1b75x63ddl0799sdp0i2j3_result.png)
+![result03](outputs/inference_100steps/03_cju1amqw6p8pw0993d9gc5crl_result.png)
+![result05](outputs/inference_100steps/05_cju1ats0y372e08011yazcsxm_result.png)
+![result07](outputs/inference_100steps/07_cju1b3zgj3d8e0801kpolea6c_result.png)
+![result09](outputs/inference_100steps/09_cju1bhnfitmge0835ynls0l6b_result.png)
+![result10](outputs/inference_100steps/10_cju1bm8063nmh07996rsjjemq_result.png)
+![result01](outputs/inference_100steps/01_cju18kevfrojc0835bn90f1in_result.png)
+
 ## 참고
 
 - [SAM 공식 저장소](https://github.com/facebookresearch/segment-anything)
