@@ -124,22 +124,39 @@ against the classical FFT-domain phase-spectrum saliency (`a=b=1.0`):
 | FRFT (a=b=0.9) | 1769 | 0.347 |
 | FFT (a=b=1.0)  | 1217 | 0.504 |
 
-Both methods clearly localize the defect (see `output/06_montage_fabric.png`:
-input \| ground truth \| FRFT saliency \| FFT saliency). On this
-*perfectly regular* synthetic grid, plain FFT-based phase saliency actually
-scores higher: at `a=0.9` the transform is not purely frequency-domain, so
-some of the grid's spatial-domain periodicity leaks into the saliency map
-as background texture, whereas `a=1` (pure phase spectrum) fully suppresses
-strictly periodic structure. This is reported as-is rather than tuned away
-— the paper's reported advantage of FRFT over FFT likely shows up more on
-real (noisy, imperfectly periodic) fabric photographs and with the full
-quaternion (color + intensity + edge) representation, neither of which this
-single-channel grayscale demo implements.
+Both methods clearly localize the defect. From left to right: input \|
+ground truth \| FRFT saliency (a=b=0.9) \| FFT saliency (a=b=1.0):
 
-A natural-image sanity check (`output/09_montage_natural.png`, the standard
-"mandrill" test image) shows the saliency map reasonably highlighting the
-eyes, consistent with typical phase-spectrum saliency behavior in the
-literature.
+![Fabric defect: input, ground truth, FRFT saliency, FFT saliency](output/06_montage_fabric.png)
+
+On this *perfectly regular* synthetic grid, plain FFT-based phase saliency
+actually scores higher: at `a=0.9` the transform is not purely
+frequency-domain, so some of the grid's spatial-domain periodicity leaks
+into the saliency map as background texture, whereas `a=1` (pure phase
+spectrum) fully suppresses strictly periodic structure. This is reported
+as-is rather than tuned away — the paper's reported advantage of FRFT over
+FFT likely shows up more on real (noisy, imperfectly periodic) fabric
+photographs and with the full quaternion (color + intensity + edge)
+representation, neither of which this single-channel grayscale demo
+implements.
+
+Individual stages:
+
+| Input | FRFT saliency (a=b=0.9) | FFT saliency (a=b=1.0) |
+|---|---|---|
+| ![fabric input](output/01_fabric_input.png) | ![FRFT saliency](output/02_saliency_frft_a0.9.png) | ![FFT saliency](output/03_saliency_fft_a1.0.png) |
+
+Thresholded detection masks (mean + 3σ) used for the IoU numbers above:
+
+| FRFT mask | FFT mask |
+|---|---|
+| ![FRFT mask](output/04_mask_frft.png) | ![FFT mask](output/05_mask_fft.png) |
+
+A natural-image sanity check (the standard "mandrill" test image) shows the
+saliency map reasonably highlighting the eyes, consistent with typical
+phase-spectrum saliency behavior in the literature:
+
+![Mandrill: input and FRFT saliency map](output/09_montage_natural.png)
 
 ## Known simplifications vs. the paper
 
