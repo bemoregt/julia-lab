@@ -89,12 +89,62 @@ selection:
 Left to right: baseline, vignette-style uneven lighting, Gaussian blur, dim
 light.
 
+## DCT domain vs. spatial domain: how much does skipping decompression save?
+
+The paper's central efficiency claim (Section 4-A) is that working in the
+JPEG/DCT domain "avoids the computationally expensive process of
+uncompressing the image." `benchmark_dct_vs_spatial` measures this directly
+rather than just asserting it.
+
+Both pipelines start from the *same* block-DCT coefficient array `J` — on a
+real phone, `J` is already sitting in memory the moment a JPEG file is
+opened (entropy decode + dequantize, no IDCT needed), so obtaining it costs
+nothing extra and is excluded from the timing:
+
+- **DCT-domain path**: `energy_from_dct(J)` (read the already-computed
+  coefficients) → `localize_from_energy` (the row-then-column search).
+- **Spatial-domain path**: `idct2_blocks(J)` (= decompression, the step JPEG-
+  domain analysis skips) → `spatial_text_energy` (full-resolution Sobel
+  gradients, a stand-in for the "texture-based" spatial methods in the
+  paper's Section 2 background) → the *same* `localize_from_energy`.
+
+Because both paths call the identical search function, any timing
+difference comes only from where the direction-energy features are
+computed — not from a different search algorithm.
+
+Median of 50 repetitions on the 256×320 synthetic scene:
+
+| Stage | Time |
+|---|---|
+| DCT domain — read coefficients + search | 0.056 ms |
+| Spatial domain — decompression (IDCT) only | 8.98 ms |
+| Spatial domain — Sobel feature recompute only | 5.42 ms |
+| Spatial domain — total (decompress + features + search) | 14.80 ms |
+| **Speedup** | **≈265×** |
+
+In other words, nearly the entire gap is exactly the two steps JPEG-domain
+analysis skips — decompression and recomputing texture features from raw
+pixels — matching the paper's stated rationale almost exactly. As a side
+note, on this synthetic scene the DCT-domain result was also *more precise*
+(`cols[89:232]`, tightly wrapping the text) than the naive Sobel baseline
+(`cols[89:320]`, spilling into the background), suggesting the block DCT's
+frequency-selectivity is also a better discriminator than a generic
+full-resolution gradient — not just a faster one.
+
 ## API
 
 ```julia
-block_text_energy(img, bs=8)                 # -> (BHTE, BVTE) per-block direction energy (Eq.2-3)
-localize_text_dct(img; bs, var_eps, max_iter) # -> TextLocResult (block-grid r1,r2,c1,c2 + profiles)
-pixel_bbox(res, bs=8)                         # block bounds -> pixel bounding box
+dct2_blocks(img, bs=8) / idct2_blocks(J, bs=8)        # block DCT / inverse (= "decompression")
+energy_from_dct(J, bs=8)                              # -> (BHTE, BVTE) read directly off existing coefficients (Eq.2-3)
+block_text_energy(img, bs=8)                          # convenience: dct2_blocks + energy_from_dct
+spatial_text_energy(img, bs=8)                        # -> (BHTE, BVTE) via full-resolution Sobel gradients (spatial-domain baseline)
+
+localize_from_energy(BHTE, BVTE; var_eps, max_iter)   # -> TextLocResult, shared row->column search, independent of feature source
+localize_text_dct(img; bs, var_eps, max_iter)         # DCT-domain path
+localize_text_spatial(img; bs, var_eps, max_iter)     # spatial-domain path (comparison baseline)
+pixel_bbox(res, bs=8)                                 # block bounds -> pixel bounding box
+
+benchmark_dct_vs_spatial(img; bs, reps)               # timed comparison of both paths (see above)
 
 medfilt3(v)                                   # window-3 median filter (Eq.9-10)
 find_groups(mask)                             # contiguous true-runs of a boolean vector

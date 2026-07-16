@@ -33,27 +33,103 @@ using Statistics: mean, median, var
 #    방향 주파수. 문자 획은 배경과 달리 가로/세로 두 방향 모두에서 뚜렷한
 #    에지를 만들므로, "순수 가로 방향" 성분(u=0, v=1..7)과 "순수 세로
 #    방향" 성분(u=1..7, v=0)의 에너지를 블록마다 따로 정의한다.
+#
+#    dct2_blocks/idct2_blocks를 분리해 둔 이유: 실제 모바일 JPEG 파이프라인
+#    에서는 파일을 열기만 해도(엔트로피 디코딩+역양자화) 블록 DCT 계수 J가
+#    "공짜로" 주어진다. 반면 공간 도메인 방식은 그 J를 픽셀로 되돌리는
+#    IDCT("압축 해제", idct2_blocks)를 먼저 거쳐야만 분석을 시작할 수
+#    있다 — 이 IDCT 단계 자체가 논문이 말하는 "avoiding the computationally
+#    expensive process of uncompressing the image"의 실체이며, 아래 8절의
+#    벤치마크가 정확히 이 차이를 측정한다.
 # ---------------------------------------------------------------------------
 
-"""
-block_text_energy(img, bs=8) -> (BHTE, BVTE)
-
-img를 겹치지 않는 bs×bs 블록으로 나누고 각 블록에 2D DCT-II를 적용해,
-Block Horizontal Text Energy(BHTE, 순수 가로방향 AC 계수 절대값의 합)와
-Block Vertical Text Energy(BVTE, 순수 세로방향 AC 계수 절대값의 합)를
-블록 단위 행렬로 반환한다(Eq.2-3의 재구성).
-"""
-function block_text_energy(img::AbstractMatrix{<:Real}, bs::Int=8)
+"""dct2_blocks(img, bs=8) -> J, 블록별 직교정규 2D DCT-II (JPEG이 저장하는 표현)."""
+function dct2_blocks(img::AbstractMatrix{<:Real}, bs::Int=8)
     rows, cols = size(img)
     @assert rows % bs == 0 && cols % bs == 0 "이미지 크기가 블록 크기의 배수여야 합니다"
+    J = zeros(Float64, rows, cols)
+    @inbounds for by in 0:bs:rows-1, bx in 0:bs:cols-1
+        J[by+1:by+bs, bx+1:bx+bs] = FFTW.dct(Float64.(img[by+1:by+bs, bx+1:bx+bs]))
+    end
+    return J
+end
+
+"""idct2_blocks(J, bs=8) -> img, 블록별 역DCT("압축 해제"). 공간 도메인 방식만 필요로 하는 단계."""
+function idct2_blocks(J::AbstractMatrix{<:Real}, bs::Int=8)
+    rows, cols = size(J)
+    img = zeros(Float64, rows, cols)
+    @inbounds for by in 0:bs:rows-1, bx in 0:bs:cols-1
+        img[by+1:by+bs, bx+1:bx+bs] = FFTW.idct(J[by+1:by+bs, bx+1:bx+bs])
+    end
+    return img
+end
+
+"""
+energy_from_dct(J, bs=8) -> (BHTE, BVTE)
+
+이미 계산되어 있는 블록 DCT 계수 J로부터 직접 Block Horizontal/Vertical
+Text Energy를 읽어낸다(Eq.2-3의 재구성). 재계산이 필요 없으므로 실제 JPEG
+파이프라인에서는 이 단계의 한계비용이 거의 0이다.
+"""
+function energy_from_dct(J::AbstractMatrix{<:Real}, bs::Int=8)
+    rows, cols = size(J)
     nr, nc = rows ÷ bs, cols ÷ bs
     BHTE = zeros(Float64, nr, nc)
     BVTE = zeros(Float64, nr, nc)
     @inbounds for bi in 1:nr, bj in 1:nc
-        blk = @view img[(bi-1)*bs+1:bi*bs, (bj-1)*bs+1:bj*bs]
-        F = FFTW.dct(Float64.(blk))
+        F = @view J[(bi-1)*bs+1:bi*bs, (bj-1)*bs+1:bj*bs]
         BHTE[bi, bj] = sum(abs, @view F[1, 2:bs])   # u=0, v=1..bs-1 (가로 방향)
         BVTE[bi, bj] = sum(abs, @view F[2:bs, 1])   # u=1..bs-1, v=0 (세로 방향)
+    end
+    return BHTE, BVTE
+end
+
+"""block_text_energy(img, bs=8) -> (BHTE, BVTE). 픽셀에서 바로 시작할 때의 편의 함수(=dct2_blocks+energy_from_dct)."""
+block_text_energy(img::AbstractMatrix{<:Real}, bs::Int=8) = energy_from_dct(dct2_blocks(img, bs), bs)
+
+# ---------------------------------------------------------------------------
+# 1b. 공간 도메인 대조군 (Section 2에서 언급하는 "Texture-Based" 부류: 에지/
+#     그라디언트 에너지를 압축 해제된 픽셀에서 직접 계산) — 8절 벤치마크에서
+#     DCT 도메인 방식과 정확도는 동일한 탐색 로직으로, 속도만 비교하기 위한
+#     대응 특징 추출기.
+# ---------------------------------------------------------------------------
+
+const SOBEL_X = Float64[-1 0 1; -2 0 2; -1 0 1]        # 가로(열) 방향 변화 검출
+const SOBEL_Y = Float64[-1 -2 -1; 0 0 0; 1 2 1]        # 세로(행) 방향 변화 검출
+
+function conv2d_same(img::AbstractMatrix{<:Real}, kernel::AbstractMatrix{<:Real})
+    kh, kw = size(kernel)
+    ph, pw = kh ÷ 2, kw ÷ 2
+    rows, cols = size(img)
+    padded = zeros(Float64, rows + 2ph, cols + 2pw)
+    padded[ph+1:ph+rows, pw+1:pw+cols] = img
+    out = zeros(Float64, rows, cols)
+    @inbounds for i in 1:rows, j in 1:cols
+        out[i, j] = sum(@view(padded[i:i+kh-1, j:j+kw-1]) .* kernel)
+    end
+    return out
+end
+
+"""
+spatial_text_energy(img, bs=8) -> (BHTE, BVTE)
+
+완전히 압축 해제된 전체 해상도 픽셀에 Sobel류 그라디언트 필터를 적용해
+가로/세로 변화 에너지를 구한 뒤 블록 단위로 합산한다. block_text_energy와
+같은 물리적 의미(가로/세로 방향 에너지)를 갖도록 설계했으므로, 이후의
+행→열 탐색(localize_from_energy)에 그대로 대입해 정확도는 동일하게
+유지하면서 "특징을 어디서/어떻게 얻었는가"에 따른 속도차만 분리해서 잴 수
+있다.
+"""
+function spatial_text_energy(img::AbstractMatrix{<:Real}, bs::Int=8)
+    gx = conv2d_same(img, SOBEL_X)
+    gy = conv2d_same(img, SOBEL_Y)
+    rows, cols = size(img)
+    nr, nc = rows ÷ bs, cols ÷ bs
+    BHTE = zeros(Float64, nr, nc)
+    BVTE = zeros(Float64, nr, nc)
+    @inbounds for bi in 1:nr, bj in 1:nc
+        BHTE[bi, bj] = sum(abs, @view gx[(bi-1)*bs+1:bi*bs, (bj-1)*bs+1:bj*bs])
+        BVTE[bi, bj] = sum(abs, @view gy[(bi-1)*bs+1:bi*bs, (bj-1)*bs+1:bj*bs])
     end
     return BHTE, BVTE
 end
@@ -108,9 +184,9 @@ struct TextLocResult
 end
 
 """
-localize_text_dct(img; bs=8) -> TextLocResult
+localize_from_energy(BHTE, BVTE; var_eps, max_iter) -> TextLocResult
 
-Section 3의 알고리즘 재구성:
+Section 3의 알고리즘 재구성 (특징 행렬 BHTE/BVTE의 출처와 무관한 공용 탐색):
   1) 행 프로파일 T_row(i) = ΣH_row(i)·ΣV_row(i) 을 평균 임계값으로 거칠게
      이진화해 후보 그룹들을 찾고, "에너지가 크면서 이미지 중앙에 가까운"
      그룹을 Eq.8 방식(에너지 / (1+중앙과의 거리))으로 선택한다.
@@ -121,12 +197,15 @@ Section 3의 알고리즘 재구성:
      Eq.11-14(Figure 7)의 알고리즘으로 전경(텍스트) 임계값을 구한다.
   4) 임계값을 넘는 열 그룹 중 중앙에 가장 가까운 것("middle peak")을
      최종 텍스트 폭 경계로 선택한다.
+
+DCT 도메인(block_text_energy/energy_from_dct)과 공간 도메인
+(spatial_text_energy) 어느 쪽에서 만든 BHTE/BVTE를 넣어도 동일하게
+동작하므로, 8절 벤치마크에서 "탐색 알고리즘은 고정하고 특징 추출 단계의
+비용만" 공정하게 비교할 수 있다.
 """
-function localize_text_dct(img::AbstractMatrix{<:Real}; bs::Int=8,
-                            var_eps::Float64=1e-5, max_iter::Int=50)
-    rows, cols = size(img)
-    nr, nc = rows ÷ bs, cols ÷ bs
-    BHTE, BVTE = block_text_energy(img, bs)
+function localize_from_energy(BHTE::AbstractMatrix{<:Real}, BVTE::AbstractMatrix{<:Real};
+                               var_eps::Float64=1e-5, max_iter::Int=50)
+    nr, nc = size(BHTE)
 
     # --- (a) 행 프로파일 & 조대(coarse) 텍스트 줄 후보 선택 ---
     Hrow = vec(sum(BHTE, dims=2))
@@ -176,6 +255,20 @@ function localize_text_dct(img::AbstractMatrix{<:Real}; bs::Int=8,
     c1, c2 = fg_groups[argmin([abs((g[1] + g[2]) / 2 - mid_c) for g in fg_groups])]
 
     return TextLocResult(r1, r2, c1, c2, Trow, s, thr_row, T)
+end
+
+"""localize_text_dct(img; bs=8) -> TextLocResult. DCT 도메인 경로: block_text_energy + localize_from_energy."""
+function localize_text_dct(img::AbstractMatrix{<:Real}; bs::Int=8,
+                            var_eps::Float64=1e-5, max_iter::Int=50)
+    BHTE, BVTE = block_text_energy(img, bs)
+    return localize_from_energy(BHTE, BVTE; var_eps=var_eps, max_iter=max_iter)
+end
+
+"""localize_text_spatial(img; bs=8) -> TextLocResult. 공간 도메인 경로(비교용): spatial_text_energy + localize_from_energy."""
+function localize_text_spatial(img::AbstractMatrix{<:Real}; bs::Int=8,
+                                var_eps::Float64=1e-5, max_iter::Int=50)
+    BHTE, BVTE = spatial_text_energy(img, bs)
+    return localize_from_energy(BHTE, BVTE; var_eps=var_eps, max_iter=max_iter)
 end
 
 """block bounds -> 픽셀 좌표 (r1px,r2px,c1px,c2px), bs=블록 크기."""
@@ -290,7 +383,67 @@ function hcat_with_gap(imgs::Vector{<:AbstractMatrix{RGB{Float64}}}; gap::Int=8)
 end
 
 # ---------------------------------------------------------------------------
-# 6. 데모
+# 6. DCT 도메인 vs 공간 도메인 속도 벤치마크
+#    논문 Section 4-A의 핵심 주장 — "JPEG 도메인에서 작업하면 압축 해제라는
+#    비싼 과정을 피할 수 있다" — 을 직접 측정한다. 두 경로 모두 동일한
+#    블록 DCT 계수 J에서 출발한다: 실제 모바일 기기가 JPEG 파일을 여는
+#    순간 J는 엔트로피 디코딩+역양자화만으로 이미 손에 들어오므로, J를
+#    얻는 비용은 "공짜"로 간주해 벤치마크 시간에서 제외한다.
+#      · DCT 도메인 경로   : energy_from_dct(J) -> localize_from_energy
+#      · 공간 도메인 경로  : idct2_blocks(J)(=압축 해제) -> spatial_text_energy
+#        (전체 해상도 Sobel 필터) -> localize_from_energy
+#    탐색 알고리즘(localize_from_energy)은 두 경로가 완전히 동일하므로,
+#    측정되는 시간차는 오직 "특징을 어디서 얻었는가"에서만 발생한다.
+# ---------------------------------------------------------------------------
+
+"""
+benchmark_dct_vs_spatial(img; bs=8, reps=50) -> NamedTuple
+
+동일한 블록 DCT 계수 J(JPEG 파일 파싱만으로 공짜로 얻는 데이터)에서 출발해
+DCT 도메인 경로와 공간 도메인 경로의 처리시간을 reps회 반복 측정한
+중앙값으로 비교한다. 공간 도메인 경로는 압축 해제(IDCT)와 특징 재계산
+(Sobel) 두 단계로 나누어 각각 보고하므로, 속도차가 실제로 "압축 해제
+과정"에서 비롯된다는 논문의 주장을 항목별로 검증할 수 있다.
+"""
+function benchmark_dct_vs_spatial(img::AbstractMatrix{<:Real}; bs::Int=8, reps::Int=50)
+    J = dct2_blocks(img, bs)   # JPEG 파일을 파싱하면 공짜로 주어지는 데이터 (타이밍 제외)
+
+    # 워밍업 (JIT 컴파일 비용을 측정에서 제외)
+    localize_from_energy(energy_from_dct(J, bs)...)
+    localize_from_energy(spatial_text_energy(idct2_blocks(J, bs), bs)...)
+
+    t_dct = zeros(reps)
+    t_decompress = zeros(reps)
+    t_spatial_feat = zeros(reps)
+    t_search_spatial = zeros(reps)
+
+    local res_dct, res_spatial
+    for k in 1:reps
+        t_dct[k] = @elapsed begin
+            BHTE, BVTE = energy_from_dct(J, bs)
+            res_dct = localize_from_energy(BHTE, BVTE)
+        end
+
+        t_decompress[k] = @elapsed (decompressed = idct2_blocks(J, bs))
+        t_spatial_feat[k] = @elapsed ((BHTE2, BVTE2) = spatial_text_energy(decompressed, bs))
+        t_search_spatial[k] = @elapsed (res_spatial = localize_from_energy(BHTE2, BVTE2))
+    end
+
+    t_spatial_total = t_decompress .+ t_spatial_feat .+ t_search_spatial
+
+    return (
+        dct_ms=median(t_dct) * 1000,
+        decompress_ms=median(t_decompress) * 1000,
+        spatial_feature_ms=median(t_spatial_feat) * 1000,
+        spatial_total_ms=median(t_spatial_total) * 1000,
+        speedup=median(t_spatial_total) / median(t_dct),
+        res_dct=res_dct,
+        res_spatial=res_spatial,
+    )
+end
+
+# ---------------------------------------------------------------------------
+# 7. 데모
 # ---------------------------------------------------------------------------
 
 function run_and_report(name::AbstractString, img::AbstractMatrix{<:Real})
@@ -328,6 +481,25 @@ function main()
     save("dcttext_comparison.png", comparison)
     println("\n완료: dcttext_source.png, dcttext_{baseline,uneven_light,blurred,dim_light}.png, ",
         "dcttext_comparison.png 저장됨")
+
+    println("\n[3] DCT 도메인 vs 공간 도메인 속도 비교 (50회 반복 중앙값)")
+    println("      두 경로 모두 동일한 블록 DCT 계수 J에서 출발 (J를 얻는 비용 자체는",
+        " JPEG 파일을 여는 것만으로 공짜이므로 측정에서 제외)")
+    bench = benchmark_dct_vs_spatial(scene)
+    println("  DCT 도메인   전체(특징 읽기 + 탐색)            : ",
+        round(bench.dct_ms, digits=4), " ms")
+    println("  공간 도메인  압축 해제(IDCT)만                 : ",
+        round(bench.decompress_ms, digits=4), " ms")
+    println("  공간 도메인  Sobel 특징 재계산만               : ",
+        round(bench.spatial_feature_ms, digits=4), " ms")
+    println("  공간 도메인  전체(압축해제 + 특징 + 탐색)      : ",
+        round(bench.spatial_total_ms, digits=4), " ms")
+    println("  => 공간 도메인 방식이 DCT 도메인 방식보다 약 ",
+        round(bench.speedup, digits=2), "배 느림")
+    r1a, r2a, c1a, c2a = pixel_bbox(bench.res_dct)
+    r1b, r2b, c1b, c2b = pixel_bbox(bench.res_spatial)
+    println("  검출 결과 일치 확인 - DCT: 픽셀 rows[$r1a:$r2a] cols[$c1a:$c2a]  ",
+        "공간: 픽셀 rows[$r1b:$r2b] cols[$c1b:$c2b]")
 end
 
 main()
